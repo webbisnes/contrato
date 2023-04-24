@@ -31,7 +31,10 @@ contract CustomToken is ERC20, Ownable {
         tokenBurn = _tokenBurn;
 
         // Crear el par en Uniswap
-        swapRouter = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
+        //Mainnet - 0xE592427A0AEce92De3Edee1F18E0157C05861564
+        //TESNET GOERLI - 0x13B2077A039Aa0d0eCcBf6c68ACD46B60B4B4b4A
+        
+        swapRouter = ISwapRouter(0x13B2077A039Aa0d0eCcBf6c68ACD46B60B4B4b4A);
         uniswapV3Pool = IUniswapV3Pool(swapRouter.exactOutputSingle(
             ISwapRouter.ExactOutputSingleParams({
                 tokenIn: address(this),
