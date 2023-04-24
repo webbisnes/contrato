@@ -3,19 +3,13 @@
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
-import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
+import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
+import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 
-
-contract Lolo is ERC20, Ownable {
-    IUniswapV2Router02 public uniswapV2Router;
-    address public uniswapV2Pair;
-
-    address public tokenReward;
-    address public tokenBurn;
-    address constant burnWallet = 0x000000000000000000000000000000000000dEaD;
+contract CustomToken is ERC20, Ownable {
+    INonfungiblePositionManager public immutable nonfungiblePositionManager;
+    ISwapRouter public immutable swapRouter;
 
     uint256 public constant MAX_SUPPLY = 1 * 10**15 * 10**18;
 
@@ -27,16 +21,9 @@ contract Lolo is ERC20, Ownable {
     mapping(address => bool) public excludedFromReward;
     mapping(address => bool) public excludedFromBurn;
 
-    constructor(address _tokenReward, address _tokenBurn) ERC20("Lolo", "LOLO") {
-        tokenReward = _tokenReward;
-        tokenBurn = _tokenBurn;
-
-        // Crear el par en Uniswap para la red de prueba
-        IUniswapV2Router02 _uniswapV2Router = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
-        uniswapV2Pair = IUniswapV2Factory(_uniswapV2Router.factory()).createPair(address(this), _uniswapV2Router.WETH());
-
-        // Establecer el router de Uniswap para la red de prueba
-        uniswapV2Router = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
+    constructor(address _nonfungiblePositionManager, address _swapRouter) ERC20("CustomToken", "CTK") {
+        nonfungiblePositionManager = INonfungiblePositionManager(_nonfungiblePositionManager);
+        swapRouter = ISwapRouter(_swapRouter);
 
         // Mint tokens al propietario
         _mint(owner(), MAX_SUPPLY);
@@ -56,7 +43,7 @@ contract Lolo is ERC20, Ownable {
         uint256 impuesto = impuestoCompra;
         uint256 montoTransferencia = amount - (amount * impuesto) / 100;
 
-        if (recipient == uniswapV2Pair) {
+        if (recipient == address(nonfungiblePositionManager)) {
             impuesto = impuestoVenta;
             montoTransferencia = amount - (amount * impuesto) / 100;
         }
@@ -74,30 +61,30 @@ contract Lolo is ERC20, Ownable {
             uint256 impuestoLiquidez = (amount * impuesto) / 100;
             uint256 impuestoMarketing = (amount * impuesto) / 100;
 
-            super.transfer(burnWallet, impuestoBurn);
-            super.transfer(tokenReward, impuestoReward);
-            super.transfer(address(this), impuestoLiquidez);
+            super.transfer(address(nonfungiblePositionManager), impuestoLiquidez);
             super.transfer(owner(), impuestoMarketing);
 
-            // Agregar liquidez a Uniswap
-            uint256 tokenParaLiquidez = balanceOf(address(this));
-            uint256 tokenParaETH = (tokenParaLiquidez * impuestoLiquidez) / 100;
-            uint256 tokenParaToken = tokenParaLiquidez - tokenParaETH;
+            // Realizar el swap para obtener tokens de recompensa y quemar tokens
+            address[] memory path = new address[](2);
+            path[0] = address(this);
+            path[1] = address(0);
 
-            if (tokenParaETH > 0) {
-                // Aprobar el gasto de los tokens
-                approve(address(uniswapV2Router), tokenParaETH);
+            uint256 deadline = block.timestamp + 300; // 5 minutos
+            uint256 amountOutMin = 0;
 
-                // Agregar liquidez a Uniswap
-                uniswapV2Router.addLiquidityETH{value: tokenParaETH}(
-                    address(this),
-                    tokenParaToken,
-                    0,
-                    0,
-                    owner(),
-                    block.timestamp + 360
-                );
-            }
+            // Realizar el swap para obtener tokens de recompensa y quemar tokens
+            swapRouter.exactInputSingle(
+                ISwapRouter.ExactInputSingleParams({
+                    tokenIn: address(this),
+                    tokenOut: address(0),
+                    fee: 3000,
+                    recipient: address(this),
+                    deadline: deadline,
+                    amountIn: impuestoBurn,
+                    amountOutMinimum: amountOutMin,
+                    sqrtPriceLimitX96: 0
+                })
+            );
         }
 
         return true;
@@ -123,26 +110,30 @@ contract Lolo is ERC20, Ownable {
         impuestoVenta = newImpuesto;
     }
 
-    function setTokenReward(address newTokenReward) external onlyOwner {
-        tokenReward = newTokenReward;
-    }
-
-    function setTokenBurn(address newTokenBurn) external onlyOwner {
-        tokenBurn = newTokenBurn;
-    }
     function withdrawLiquidity() external onlyOwner {
-        // Obtener la cantidad de tokens y ETH en la liquidez
-        (uint256 tokenAmount, uint256 ethAmount) = uniswapV2Router.removeLiquidityETH(
-            address(this),
-            balanceOf(uniswapV2Pair),
-            0,
-            0,
-            owner(),
-            block.timestamp
+        // Obtener la posición de liquidez más reciente del contrato
+        uint256 tokenId = nonfungiblePositionManager.balanceOf(address(this)) - 1;
+        (uint256 amount0, uint256 amount1) = nonfungiblePositionManager.collect(
+            INonfungiblePositionManager.CollectParams({
+                tokenId: tokenId,
+                recipient: address(this),
+                amount0Max: type(uint128).max,
+                amount1Max: type(uint128).max
+            })
         );
-        
-        // Transferir los tokens y ETH a la dirección del propietario
-        _transfer(address(this), owner(), tokenAmount);
-        payable(owner()).transfer(ethAmount);
+
+        // Realizar el swap de los tokens de Uniswap por ETH
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = swapRouter.WETH9();
+
+        uint256 amountIn = (amount0 > 0) ? amount0 : amount1;
+        uint256 deadline = block.timestamp + 300; // 5 minutos
+
+        ERC20(address(this)).approve(address(swapRouter), amountIn);
+        swapRouter.swapExactTokensForETH(amountIn, 0, path, address(this), deadline);
+
+        // Transferir ETH al propietario
+        payable(owner()).transfer(address(this).balance);
     }
 }
