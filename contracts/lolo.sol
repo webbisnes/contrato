@@ -3,13 +3,18 @@
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import "@uniswap/v3-core/contracts/interfaces/pool/IUniswapV3Pool.sol";
 
 contract CustomToken is ERC20, Ownable {
-    INonfungiblePositionManager public immutable nonfungiblePositionManager;
-    ISwapRouter public immutable swapRouter;
+    ISwapRouter public swapRouter;
+    IUniswapV3Pool public uniswapV3Pool;
+
+    address public tokenReward;
+    address public tokenBurn;
+    address public burnWallet = 0x000000000000000000000000000000000000dEaD;
 
     uint256 public constant MAX_SUPPLY = 1 * 10**15 * 10**18;
 
@@ -21,9 +26,24 @@ contract CustomToken is ERC20, Ownable {
     mapping(address => bool) public excludedFromReward;
     mapping(address => bool) public excludedFromBurn;
 
-    constructor(address _nonfungiblePositionManager, address _swapRouter) ERC20("CustomToken", "CTK") {
-        nonfungiblePositionManager = INonfungiblePositionManager(_nonfungiblePositionManager);
-        swapRouter = ISwapRouter(_swapRouter);
+    constructor(address _tokenReward, address _tokenBurn) ERC20("CustomToken", "CTK") {
+        tokenReward = _tokenReward;
+        tokenBurn = _tokenBurn;
+
+        // Crear el par en Uniswap
+        swapRouter = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
+        uniswapV3Pool = IUniswapV3Pool(swapRouter.exactOutputSingle(
+            ISwapRouter.ExactOutputSingleParams({
+                tokenIn: address(this),
+                tokenOut: swapRouter.WETH9(),
+                fee: 3000, // 0.3% fee
+                recipient: address(this),
+                deadline: block.timestamp + 1800, // 30 minutes from now
+                amountOut: 1, // We only care about the WETH price of this token
+                amountInMaximum: MAX_SUPPLY, // We want to swap all tokens in the pool
+                sqrtPriceLimitX96: 0
+            })
+        ).pool);
 
         // Mint tokens al propietario
         _mint(owner(), MAX_SUPPLY);
@@ -43,7 +63,7 @@ contract CustomToken is ERC20, Ownable {
         uint256 impuesto = impuestoCompra;
         uint256 montoTransferencia = amount - (amount * impuesto) / 100;
 
-        if (recipient == address(nonfungiblePositionManager)) {
+        if (recipient == address(uniswapV3Pool)) {
             impuesto = impuestoVenta;
             montoTransferencia = amount - (amount * impuesto) / 100;
         }
@@ -55,85 +75,58 @@ contract CustomToken is ERC20, Ownable {
         }
 
         // Distribución de impuestos
-        if (!excludedFromTax[_msgSender()]) {
-            uint256 impuestoBurn = (amount * impuesto) / 100;
-            uint256 impuestoReward = (amount * impuesto) / 100;
-            uint256 impuestoLiquidez = (amount * impuesto) / 100;
-            uint256 impuestoMarketing = (amount * impuesto) / 100;
+       
+   if (!excludedFromTax[_msgSender()]) {
+        uint256 impuestoBurn = (amount * impuesto) / 100;
+        uint256 impuestoReward = (amount * impuesto) / 100;
+        uint256 impuestoLiquidez = (amount * impuesto) / 100;
+        uint256 impuestoMarketing = (amount * impuesto) / 100;
 
-            super.transfer(address(nonfungiblePositionManager), impuestoLiquidez);
-            super.transfer(owner(), impuestoMarketing);
-
-            // Realizar el swap para obtener tokens de recompensa y quemar tokens
-            address[] memory path = new address[](2);
-            path[0] = address(this);
-            path[1] = address(0);
-
-            uint256 deadline = block.timestamp + 300; // 5 minutos
-            uint256 amountOutMin = 0;
-
-            // Realizar el swap para obtener tokens de recompensa y quemar tokens
-            swapRouter.exactInputSingle(
-                ISwapRouter.ExactInputSingleParams({
-                    tokenIn: address(this),
-                    tokenOut: address(0),
-                    fee: 3000,
-                    recipient: address(this),
-                    deadline: deadline,
-                    amountIn: impuestoBurn,
-                    amountOutMinimum: amountOutMin,
-                    sqrtPriceLimitX96: 0
-                })
-            );
-        }
-
-        return true;
+        super.transfer(burnWallet, impuestoBurn);
+        super.transfer(tokenReward, impuestoReward);
+        super.transfer(address(this), impuestoLiquidez);
+        super.transfer(owner(), impuestoMarketing);
     }
 
-    function setExcludedFromTax(address account, bool excluded) external onlyOwner {
-        excludedFromTax[account] = excluded;
-    }
+    return true;
+}
 
-    function setExcludedFromReward(address account, bool excluded) external onlyOwner {
-        excludedFromReward[account] = excluded;
-    }
+function setExcludedFromTax(address account, bool excluded) external onlyOwner {
+    excludedFromTax[account] = excluded;
+}
 
-    function setExcludedFromBurn(address account, bool excluded) external onlyOwner {
-        excludedFromBurn[account] = excluded;
-    }
+function setExcludedFromReward(address account, bool excluded) external onlyOwner {
+    excludedFromReward[account] = excluded;
+}
 
-    function setImpuestoCompra(uint256 newImpuesto) external onlyOwner {
-        impuestoCompra = newImpuesto;
-    }
+function setExcludedFromBurn(address account, bool excluded) external onlyOwner {
+    excludedFromBurn[account] = excluded;
+}
 
-    function setImpuestoVenta(uint256 newImpuesto) external onlyOwner {
-        impuestoVenta = newImpuesto;
-    }
+function setImpuestoCompra(uint256 newImpuesto) external onlyOwner {
+    impuestoCompra = newImpuesto;
+}
 
-    function withdrawLiquidity() external onlyOwner {
-        // Obtener la posición de liquidez más reciente del contrato
-        uint256 tokenId = nonfungiblePositionManager.balanceOf(address(this)) - 1;
-        (uint256 amount0, uint256 amount1) = nonfungiblePositionManager.collect(
-            INonfungiblePositionManager.CollectParams({
-                tokenId: tokenId,
-                recipient: address(this),
-                amount0Max: type(uint128).max,
-                amount1Max: type(uint128).max
-            })
-        );
+function setImpuestoVenta(uint256 newImpuesto) external onlyOwner {
+    impuestoVenta = newImpuesto;
+}
 
-        // Realizar el swap de los tokens de Uniswap por ETH
-        address[] memory path = new address[](2);
-        path[0] = address(this);
-        path[1] = swapRouter.WETH9();
+function setTokenReward(address newTokenReward) external onlyOwner {
+    tokenReward = newTokenReward;
+}
 
-        uint256 amountIn = (amount0 > 0) ? amount0 : amount1;
-        uint256 deadline = block.timestamp + 300; // 5 minutos
+function setTokenBurn(address newTokenBurn) external onlyOwner {
+    tokenBurn = newTokenBurn;
+}
 
-        ERC20(address(this)).approve(address(swapRouter), amountIn);
-        swapRouter.swapExactTokensForETH(amountIn, 0, path, address(this), deadline);
+function withdrawLiquidity() external onlyOwner {
+    // Obtener la cantidad de tokens y ETH en la liquidez
+    (uint256 tokenAmount, uint256 ethAmount) = uniswapV3Pool.burn(
+        address(this)
+    );
 
-        // Transferir ETH al propietario
-        payable(owner()).transfer(address(this).balance);
-    }
+    // Transferir los tokens y ETH a la dirección del propietario
+    _transfer(address(this), owner(), tokenAmount);
+    payable(owner()).transfer(ethAmount);
+}
 }
